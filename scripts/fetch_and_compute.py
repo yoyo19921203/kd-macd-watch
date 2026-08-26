@@ -43,11 +43,25 @@ def _num(row, idx, key):
         return None
 
 
+def _get_with_retry(url, tries=4, timeout=20):
+    """對網路不穩（連線中斷、逾時）做重試，避免單一日期的暫時性錯誤打斷整個回補流程。"""
+    last_err = None
+    for i in range(tries):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=timeout)
+            r.raise_for_status()
+            return r
+        except (requests.exceptions.RequestException,) as e:
+            last_err = e
+            if i < tries - 1:
+                time.sleep(1.5 * (i + 1))
+    raise last_err
+
+
 def fetch_twse(d: date):
     ymd = d.strftime("%Y%m%d")
     url = f"https://www.twse.com.tw/exchangeReport/MI_INDEX?response=json&date={ymd}&type=ALLBUT0999"
-    r = requests.get(url, headers=HEADERS, timeout=20)
-    r.raise_for_status()
+    r = _get_with_retry(url)
     data = r.json()
     if data.get("stat") != "OK":
         return [], None
@@ -85,8 +99,7 @@ def fetch_twse(d: date):
 def fetch_tpex(d: date):
     roc = to_roc_date(d)
     url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&d={roc}"
-    r = requests.get(url, headers=HEADERS, timeout=20)
-    r.raise_for_status()
+    r = _get_with_retry(url)
     data = r.json()
     rows = []
     for t in data.get("tables", []):
@@ -133,7 +146,12 @@ def backfill(days: int):
     while got < days and checked < days * 3:
         path = f"{RAW_DIR}/{d.strftime('%Y%m%d')}.json"
         if not os.path.exists(path):
-            snap = fetch_one_day(d)
+            try:
+                snap = fetch_one_day(d)
+            except Exception as e:
+                # 單一天網路不穩（重試後仍失敗）不要讓整個回補流程中斷，跳過這天繼續下一天。
+                print(f"{d} 抓取失敗，略過：{e}")
+                snap = None
             if snap:
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(snap, f, ensure_ascii=False)
